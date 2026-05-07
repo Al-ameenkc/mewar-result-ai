@@ -5,14 +5,13 @@ import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Sparkles, ArrowRight, BookOpen, GraduationCap, Building2, Calendar,
-  School, ArrowLeft, LayoutDashboard, Users, FileText, 
-  Settings, HelpCircle, ChevronDown, Download, Plus, TrendingUp, 
-  TrendingDown, MoreHorizontal, BrainCircuit, UserCheck, AlertCircle,
-  Mail, Lock, X
+  School, ArrowLeft, FileText, Mail, Lock, X, Loader2, Eye, EyeOff, AlertCircle
 } from 'lucide-react';
+import { createClient } from '@/utils/supabase/client';
+import { generateAIAnalysis } from '@/app/actions/analysis';
 
 // --- Types ---
-type Step = 'faculty' | 'department' | 'level' | 'semester' | 'assessment-type' | 'input-scores' | 'analyzing';
+type Step = 'faculty' | 'department' | 'level' | 'semester' | 'input-scores' | 'analyzing';
 
 type Course = {
   id: string;
@@ -23,7 +22,14 @@ type Course = {
   code: string;
   title: string;
   units: number;
+  max_exam: number;
+  max_ca: number;
+  max_attendance: number;
 };
+type ScoreEntry = { ca: number | null; exam: number | null };
+
+const COURSES_CACHE_KEY = 'miu_courses_cache_v1';
+const COURSES_CACHE_TTL_MS = 1000 * 60 * 5;
 
 // --- Structural Data ---
 const MIU_DATA = {
@@ -43,23 +49,59 @@ export default function ModernChatBoard() {
   const [step, setStep] = useState<Step>('faculty');
   const [allCourses, setAllCourses] = useState<Course[]>([]);
   const [selections, setSelections] = useState({
-    faculty: '', department: '', level: '', semester: '', assessmentType: ''
+    faculty: '', department: '', level: '', semester: ''
   });
-  const [scores, setScores] = useState<Record<string, number>>({});
+  const [scores, setScores] = useState<Record<string, ScoreEntry>>({});
   
   // Auth & Session States
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+
+  const supabase = createClient();
 
   useEffect(() => {
-    const saved = localStorage.getItem('miu_courses');
-    if (saved) {
-      setAllCourses(JSON.parse(saved));
-    }
-    // Check if user was previously logged in
-    const user = localStorage.getItem('miu_user_session');
-    if (user) setIsLoggedIn(true);
+    const fetchCourses = async () => {
+      const cachedRaw = localStorage.getItem(COURSES_CACHE_KEY);
+      if (cachedRaw) {
+        try {
+          const cached = JSON.parse(cachedRaw) as { ts: number; data: Course[] };
+          if (Date.now() - cached.ts < COURSES_CACHE_TTL_MS && Array.isArray(cached.data)) {
+            setAllCourses(cached.data);
+          }
+        } catch {
+          localStorage.removeItem(COURSES_CACHE_KEY);
+        }
+      }
+
+      const { data, error } = await supabase.from('courses').select('*');
+      if (!error && data) {
+        setAllCourses(data as Course[]);
+        localStorage.setItem(COURSES_CACHE_KEY, JSON.stringify({ ts: Date.now(), data }));
+      }
+    };
+    
+    fetchCourses();
+    
+    // Check initial session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setIsLoggedIn(!!session);
+      setUserEmail(session?.user?.email || null);
+    });
+
+    // Listen for auth changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setIsLoggedIn(!!session);
+      setUserEmail(session?.user?.email || null);
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
   const handleSelection = (field: keyof typeof selections, value: string | number) => {
@@ -67,13 +109,38 @@ export default function ModernChatBoard() {
     if (field === 'faculty') setStep('department');
     if (field === 'department') setStep('level');
     if (field === 'level') setStep('semester');
-    if (field === 'semester') setStep('assessment-type');
-    if (field === 'assessmentType') setStep('input-scores');
+    if (field === 'semester') setStep('input-scores');
   };
 
-  const handleScoreChange = (code: string, val: string) => {
-    const numericValue = parseInt(val) || 0;
-    setScores(prev => ({ ...prev, [code]: numericValue }));
+  const handleScoreChange = (code: string, type: 'ca' | 'exam', val: string) => {
+    if (val.trim() === '') {
+      setScores(prev => ({
+        ...prev,
+        [code]: {
+          ca: prev[code]?.ca ?? null,
+          exam: prev[code]?.exam ?? null,
+          [type]: null,
+        },
+      }));
+      return;
+    }
+
+    const parsed = parseInt(val);
+    const targetCourse = filteredCourses.find((course) => course.code === code);
+    const caMax = Number((targetCourse?.max_ca ?? 30) + (targetCourse?.max_attendance ?? 10));
+    const examMax = Number(targetCourse?.max_exam ?? 60);
+    const allowedMax = type === 'ca' ? caMax : examMax;
+    const isInvalid = !Number.isFinite(parsed) || parsed < 0 || parsed > allowedMax;
+    const nextValue = isInvalid ? null : parsed;
+
+    setScores(prev => ({
+      ...prev,
+      [code]: {
+        ca: prev[code]?.ca ?? null,
+        exam: prev[code]?.exam ?? null,
+        [type]: nextValue,
+      },
+    }));
   };
 
   const goBack = () => {
@@ -81,13 +148,56 @@ export default function ModernChatBoard() {
       case 'department': setStep('faculty'); break;
       case 'level': setStep('department'); break;
       case 'semester': setStep('level'); break;
-      case 'assessment-type': setStep('semester'); break;
-      case 'input-scores': setStep('assessment-type'); break;
+      case 'input-scores': setStep('semester'); break;
       default: break;
     }
   };
 
-  const executeAnalysis = () => {
+  const executeAnalysis = async () => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.user) {
+      setAuthMode('login');
+      setIsAuthOpen(true);
+      return;
+    }
+
+    const hasEmptyScore = filteredCourses.some((course) =>
+      scores[course.code]?.ca === null ||
+      scores[course.code]?.ca === undefined ||
+      scores[course.code]?.exam === null ||
+      scores[course.code]?.exam === undefined
+    );
+
+    if (hasEmptyScore) {
+      alert('Please enter valid CA+Attendance and Exam scores for all listed courses before generating analytics.');
+      setStep('input-scores');
+      return;
+    }
+
+    const scoredCourses = filteredCourses.map((course) => {
+      const caScore = Number(scores[course.code]?.ca ?? 0);
+      const examScore = Number(scores[course.code]?.exam ?? 0);
+      const maxCa = Number((course.max_ca ?? 30) + (course.max_attendance ?? 10));
+      const maxExam = Number(course.max_exam ?? 60);
+      const totalScore = caScore + examScore;
+      const totalMax = maxCa + maxExam;
+
+      return {
+        code: course.code,
+        title: course.title,
+        units: Number(course.units),
+        caScore,
+        examScore,
+        max_ca: maxCa,
+        max_exam: maxExam,
+        totalScore,
+        totalMax,
+        caPercentage: Number(((caScore / Math.max(1, maxCa)) * 100).toFixed(2)),
+        examPercentage: Number(((examScore / Math.max(1, maxExam)) * 100).toFixed(2)),
+        totalPercentage: Number(((totalScore / Math.max(1, totalMax)) * 100).toFixed(2)),
+      };
+    });
+
     const sessionData = {
       id: Date.now().toString(),
       date: new Date().toLocaleDateString(),
@@ -95,24 +205,61 @@ export default function ModernChatBoard() {
       department: selections.department,
       level: selections.level,
       semester: selections.semester,
-      assessmentType: selections.assessmentType,
       scores: scores,
-      courses: filteredCourses.map(c => ({
-        code: c.code,
-        title: c.title,
-        units: Number(c.units)
-      }))
+      courses: scoredCourses,
+      aiAnalysis: null as any
     };
+    
+    // Call AI to generate assessment
+    setStep('analyzing');
+    const aiResult = await generateAIAnalysis(sessionData);
+    if (aiResult.success) {
+       sessionData.aiAnalysis = aiResult.analysis;
+    }
 
     localStorage.setItem('miu_current_session', JSON.stringify(sessionData));
-    const existingHistory = JSON.parse(localStorage.getItem('miu_analysis_history') || '[]');
-    localStorage.setItem('miu_analysis_history', JSON.stringify([sessionData, ...existingHistory]));
+
+    const payload = {
+      user_id: session.user.id,
+      faculty: selections.faculty,
+      department: selections.department,
+      level: selections.level,
+      semester: selections.semester,
+      assessment_type: 'Combined',
+      scores: scores,
+      courses: sessionData.courses,
+      ai_analysis: sessionData.aiAnalysis
+    };
+
+    let { error: saveError } = await supabase.from('analysis_sessions').insert(payload);
+
+    // Backward compatibility for older schemas that do not yet have ai_analysis.
+    if (saveError?.message?.includes("Could not find the 'ai_analysis' column")) {
+      const legacyPayload = {
+        user_id: session.user.id,
+        faculty: selections.faculty,
+        department: selections.department,
+        level: selections.level,
+        semester: selections.semester,
+        assessment_type: 'Combined',
+        scores: scores,
+        courses: sessionData.courses,
+      };
+      const fallbackResult = await supabase.from('analysis_sessions').insert(legacyPayload);
+      saveError = fallbackResult.error;
+    }
+
+    if (saveError) {
+      alert(`Could not save prediction to history: ${saveError.message}`);
+      setStep('input-scores');
+      return;
+    }
 
     setIsAuthOpen(false);
-    setStep('analyzing');
+    
     setTimeout(() => {
       router.push('/analytics');
-    }, 2500);
+    }, 500);
   };
 
   const startAnalysis = () => {
@@ -124,28 +271,31 @@ export default function ModernChatBoard() {
     executeAnalysis();
   };
 
-  const handleMockAuth = () => {
-    // Simulate successful login/signup
-    setIsLoggedIn(true);
-    localStorage.setItem('miu_user_session', 'active');
+  const handleAuth = async () => {
+    setAuthLoading(true);
+    setAuthError('');
     
-    // If they were in the middle of generating a prediction, continue
-    if (step === 'input-scores') {
-      executeAnalysis();
-    } else {
-      setIsAuthOpen(false);
+    try {
+      if (authMode === 'signup') {
+        const { error } = await supabase.auth.signUp({ email, password });
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+      }
+
+      // If they were in the middle of generating a prediction, continue
+      if (step === 'input-scores') {
+        executeAnalysis();
+      } else {
+        setIsAuthOpen(false);
+      }
+    } catch (error: any) {
+      setAuthError(error.message);
+    } finally {
+      setAuthLoading(false);
     }
   };
-
-  const getAssessmentConfig = () => {
-    switch (selections.assessmentType) {
-      case 'CA': return { max: 40, label: '/ 40' };
-      case 'Attendance': return { max: 100, label: '/ 100%' };
-      default: return { max: 100, label: '/ 100' };
-    }
-  };
-
-  const { max: currentMax, label: currentLabel } = getAssessmentConfig();
 
   const filteredCourses = allCourses.filter(c => 
     c.faculty === selections.faculty &&
@@ -206,6 +356,8 @@ export default function ModernChatBoard() {
                       <Mail className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
                       <input 
                         type="email" 
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
                         placeholder="name@example.com"
                         className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 pl-10 pr-4 outline-none focus:bg-white focus:ring-2 focus:ring-black/5 focus:border-black transition-all"
                       />
@@ -217,33 +369,32 @@ export default function ModernChatBoard() {
                     <div className="relative">
                       <Lock className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
                       <input 
-                        type="password" 
+                        type={showPassword ? "text" : "password"} 
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
                         placeholder="••••••••"
-                        className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 pl-10 pr-4 outline-none focus:bg-white focus:ring-2 focus:ring-black/5 focus:border-black transition-all"
+                        className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 pl-10 pr-12 outline-none focus:bg-white focus:ring-2 focus:ring-black/5 focus:border-black transition-all"
                       />
+                      <button 
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 focus:outline-none"
+                      >
+                        {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                      </button>
                     </div>
                   </div>
 
+                  {authError && <p className="text-red-500 text-xs font-semibold text-center mt-4">{authError}</p>}
+
                   <button 
-                    onClick={handleMockAuth}
-                    className="w-full bg-black text-white py-3.5 rounded-xl font-bold hover:bg-gray-800 transition-all shadow-lg shadow-black/5 mt-2"
+                    onClick={handleAuth}
+                    disabled={authLoading}
+                    className="w-full bg-black text-white py-3.5 rounded-xl font-bold hover:bg-gray-800 transition-all shadow-lg shadow-black/5 mt-6 flex items-center justify-center gap-2 disabled:opacity-70"
                   >
+                    {authLoading && <Loader2 size={16} className="animate-spin" />}
                     {authMode === 'login' ? 'Sign In' : 'Create Account'}
                   </button>
-
-                  <div className="relative my-6">
-                    <div className="absolute inset-0 flex items-center"><span className="w-full border-t border-gray-100"></span></div>
-                    <div className="relative flex justify-center text-xs uppercase"><span className="bg-white px-2 text-gray-400">Or continue with</span></div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3">
-                    <button onClick={handleMockAuth} className="flex items-center justify-center gap-2 border border-gray-100 py-2.5 rounded-xl hover:bg-gray-50 transition-all text-sm font-medium">
-                      <img src="https://www.svgrepo.com/show/475656/google-color.svg" className="w-4 h-4" alt="Google" /> Google
-                    </button>
-                    <button onClick={handleMockAuth} className="flex items-center justify-center gap-2 border border-gray-100 py-2.5 rounded-xl hover:bg-gray-50 transition-all text-sm font-medium">
-                      <img src="https://www.svgrepo.com/show/511330/apple-173.svg" className="w-4 h-4" alt="Apple" /> Apple
-                    </button>
-                  </div>
                 </div>
 
                 <p className="text-center text-sm text-gray-500 mt-8">
@@ -261,9 +412,9 @@ export default function ModernChatBoard() {
         )}
       </AnimatePresence>
 
-      <nav className="flex items-center justify-between px-8 py-6 max-w-6xl mx-auto">
+      <nav className="relative z-10 flex items-center justify-between px-4 py-4 md:px-8 md:py-6 max-w-6xl mx-auto gap-3">
         <div 
-          className="flex items-center gap-2 font-bold text-xl tracking-tight cursor-pointer" 
+          className="flex items-center gap-2 font-bold text-lg md:text-xl tracking-tight cursor-pointer shrink-0" 
           onClick={() => router.push('/')}
         >
           <div className="bg-black text-white p-1.5 rounded-md"><School size={18} /></div>
@@ -283,26 +434,36 @@ export default function ModernChatBoard() {
             History
           </button>
         </div>
-        {!isLoggedIn ? (
-          <button 
-            onClick={() => { setAuthMode('login'); setIsAuthOpen(true); }}
-            className="bg-black text-white px-6 py-2.5 rounded-full text-sm font-medium hover:bg-gray-800 transition-all shadow-md"
+        <div className="flex items-center gap-2 md:gap-3 shrink-0">
+          <button
+            onClick={() => router.push('/history')}
+            className="md:hidden bg-white border border-gray-200 text-gray-700 px-4 py-2.5 rounded-full text-sm font-medium hover:bg-gray-50 transition-all shadow-sm"
           >
-            Login
+            History
           </button>
-        ) : (
-          <div className="flex items-center gap-3">
-             <button 
-              onClick={() => { setIsLoggedIn(false); localStorage.removeItem('miu_user_session'); }}
-              className="text-xs font-bold text-gray-400 hover:text-red-500 transition-colors"
+          {!isLoggedIn ? (
+            <button 
+              type="button"
+              onClick={() => { setAuthMode('login'); setIsAuthOpen(true); }}
+              className="bg-black text-white px-4 md:px-6 py-2.5 rounded-full text-sm font-medium hover:bg-gray-800 transition-all shadow-md"
             >
-              Logout
+              Login
             </button>
-            <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-blue-500 to-indigo-600 flex items-center justify-center text-white font-bold shadow-sm border-2 border-white">
-              KA
+          ) : (
+            <div className="flex items-center gap-2 md:gap-3">
+              <button 
+                type="button"
+                onClick={async () => { await supabase.auth.signOut(); setIsLoggedIn(false); }}
+                className="text-xs font-bold text-gray-500 hover:text-red-500 transition-colors"
+              >
+                Logout
+              </button>
+              <div className="w-9 h-9 md:w-10 md:h-10 rounded-full bg-gradient-to-tr from-blue-500 to-indigo-600 flex items-center justify-center text-white font-bold shadow-sm border-2 border-white">
+                {userEmail ? userEmail.substring(0, 2).toUpperCase() : 'KA'}
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </nav>
 
       <main className="max-w-4xl mx-auto px-6 pt-16 flex flex-col items-center">
@@ -320,26 +481,27 @@ export default function ModernChatBoard() {
         <div className="w-full max-w-2xl bg-white/80 backdrop-blur-xl border border-white p-4 rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] mb-8">
           <AnimatePresence mode="wait">
             {step !== 'input-scores' && step !== 'analyzing' && (
-              <motion.div key="prompt-text" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="flex items-center justify-between bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
-                <div className="flex items-center gap-3 text-gray-400">
+              <motion.div key="prompt-text" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
+                <div className="flex items-center gap-3 text-gray-400 min-w-0">
                   {step !== 'faculty' && (
                     <button onClick={goBack} className="w-8 h-8 rounded-full bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-600 transition-colors border border-gray-100" title="Go Back">
                       <ArrowLeft size={16} />
                     </button>
                   )}
                   <div className="w-8 h-8 rounded-full bg-blue-50 flex items-center justify-center text-blue-500"><Sparkles size={16} /></div>
-                  <span className="text-sm">
+                  <span className="text-sm break-words">
                     {step === 'faculty' && "Select your Faculty to begin..."}
                     {step === 'department' && `Choose your Department in ${selections.faculty}...`}
                     {step === 'level' && "What is your current academic level?"}
                     {step === 'semester' && "Which semester's results are we analyzing?"}
-                    {step === 'assessment-type' && "What type of assessment are we analyzing?"}
+                    {step === 'input-scores' && "Enter your CA and Exam scores for each course."}
                   </span>
                 </div>
-                <div className="flex gap-2">
-                  {selections.faculty && <span className="text-[10px] bg-gray-100 px-2 py-1 rounded-full text-gray-600 truncate max-w-[80px]">{selections.faculty}</span>}
-                  {selections.department && <span className="text-[10px] bg-gray-100 px-2 py-1 rounded-full text-gray-600 truncate max-w-[80px]">{selections.department}</span>}
-                  {selections.assessmentType && <span className="text-[10px] bg-gray-100 px-2 py-1 rounded-full text-gray-600 truncate max-w-[80px]">{selections.assessmentType}</span>}
+                <div className="flex flex-wrap gap-2 sm:justify-end max-w-full">
+                  {selections.faculty && <span className="text-[10px] bg-gray-100 px-2 py-1 rounded-full text-gray-600 break-words max-w-full sm:max-w-[140px]">{selections.faculty}</span>}
+                  {selections.department && <span className="text-[10px] bg-gray-100 px-2 py-1 rounded-full text-gray-600 break-words max-w-full sm:max-w-[170px]">{selections.department}</span>}
+                  {selections.level && <span className="text-[10px] bg-gray-100 px-2 py-1 rounded-full text-gray-600 break-words max-w-full sm:max-w-[100px]">Level {selections.level}</span>}
+                  {selections.semester && <span className="text-[10px] bg-gray-100 px-2 py-1 rounded-full text-gray-600 break-words max-w-full sm:max-w-[120px]">Semester {selections.semester}</span>}
                 </div>
               </motion.div>
             )}
@@ -349,28 +511,41 @@ export default function ModernChatBoard() {
                 <div className="flex items-center gap-3 mb-6">
                   <button onClick={goBack} className="w-8 h-8 rounded-full bg-gray-50 hover:bg-gray-100 flex items-center justify-center text-gray-600 transition-colors border border-gray-100"><ArrowLeft size={16} /></button>
                   <div>
-                    <h3 className="font-bold text-lg text-gray-800">Enter {selections.assessmentType} Scores</h3>
-                    <p className="text-xs text-gray-400">{selections.department} • Level {selections.level} • Semester {selections.semester} • {selections.assessmentType}</p>
+                    <h3 className="font-bold text-lg text-gray-800">Enter CA and Exam Scores</h3>
+                    <p className="text-xs text-gray-400">{selections.department} • Level {selections.level} • Semester {selections.semester}</p>
                   </div>
                 </div>
                 
                 <div className="space-y-3 mb-6 max-h-[350px] overflow-y-auto pr-1">
                   {filteredCourses.length > 0 ? (
-                    filteredCourses.map((course) => (
-                      <div key={course.id} className="flex items-center justify-between p-3 rounded-xl border border-gray-50 bg-gray-50/50 hover:bg-gray-50 transition-colors">
-                        <div>
-                          <p className="font-semibold text-sm text-gray-700">{course.code}</p>
-                          <p className="text-[10px] text-gray-400 uppercase tracking-wide">{course.title} ({course.units} Units)</p>
+                    filteredCourses.map((course) => {
+                      return (
+                        <div key={course.id} className="flex items-center justify-between p-3 rounded-xl border border-gray-50 bg-gray-50/50 hover:bg-gray-50 transition-colors">
+                          <div>
+                            <p className="font-semibold text-sm text-gray-700">{course.code}</p>
+                            <p className="text-[10px] text-gray-400 uppercase tracking-wide">{course.title} ({course.units} Units)</p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="number"
+                              max={(course.max_ca ?? 30) + (course.max_attendance ?? 10)}
+                              placeholder={`CA+ATT/${(course.max_ca ?? 30) + (course.max_attendance ?? 10)}`}
+                              value={scores[course.code]?.ca ?? ''}
+                              onChange={(e) => handleScoreChange(course.code, 'ca', e.target.value)}
+                              className="w-[86px] h-10 p-2 text-center text-xs font-bold bg-white border border-gray-200 rounded-lg outline-none focus:border-black focus:ring-1 focus:ring-black transition-all"
+                            />
+                            <input
+                              type="number"
+                              max={course.max_exam ?? 60}
+                              placeholder={`EX/${course.max_exam ?? 60}`}
+                              value={scores[course.code]?.exam ?? ''}
+                              onChange={(e) => handleScoreChange(course.code, 'exam', e.target.value)}
+                              className="w-[86px] h-10 p-2 text-center text-xs font-bold bg-white border border-gray-200 rounded-lg outline-none focus:border-black focus:ring-1 focus:ring-black transition-all"
+                            />
+                          </div>
                         </div>
-                        <input 
-                          type="number" 
-                          max={currentMax}
-                          placeholder={currentLabel} 
-                          onChange={(e) => handleScoreChange(course.code, e.target.value)} 
-                          className="w-[72px] h-10 p-2 text-center text-sm font-bold bg-white border border-gray-200 rounded-lg outline-none focus:border-black focus:ring-1 focus:ring-black transition-all" 
-                        />
-                      </div>
-                    ))
+                      )
+                    })
                   ) : (
                     <div className="py-12 flex flex-col items-center justify-center text-center px-6">
                       <AlertCircle className="text-amber-400 mb-2" size={24} />
@@ -401,32 +576,25 @@ export default function ModernChatBoard() {
         </div>
 
         {step !== 'input-scores' && step !== 'analyzing' && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 w-full max-w-3xl px-4">
-            <AnimatePresence mode="popLayout">
-              {(() => {
-                if (step === 'faculty') return MIU_DATA.faculties.map(f => ({ label: f, icon: <Building2 className="w-5 h-5 text-gray-400" />, value: f, type: 'faculty' }));
-                if (step === 'department') return (MIU_DATA.departments[selections.faculty as keyof typeof MIU_DATA.departments] || []).map(d => ({ label: d, icon: <BookOpen className="w-5 h-5 text-gray-400" />, value: d, type: 'department' }));
-                if (step === 'level') return MIU_DATA.levels.map(l => ({ label: `${l} Level`, icon: <GraduationCap className="w-5 h-5 text-gray-400" />, value: l, type: 'level' }));
-                if (step === 'semester') return MIU_DATA.semesters.map(s => ({ label: `Semester ${s}`, icon: <Calendar className="w-5 h-5 text-gray-400" />, value: s, type: 'semester' }));
-                if (step === 'assessment-type') return [
-                  { label: 'Exams (/100)', icon: <FileText className="w-5 h-5 text-gray-400" />, value: 'Exams', type: 'assessmentType' },
-                  { label: 'CA (/40)', icon: <LayoutDashboard className="w-5 h-5 text-gray-400" />, value: 'CA', type: 'assessmentType' },
-                  { label: 'Attendance (%)', icon: <UserCheck className="w-5 h-5 text-gray-400" />, value: 'Attendance', type: 'assessmentType' }
-                ];
-                return [];
-              })().map((opt, idx) => (
-                <motion.button key={opt.value} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9 }} transition={{ delay: idx * 0.05 }} onClick={() => handleSelection(opt.type as keyof typeof selections, opt.value)} className="bg-white p-4 rounded-2xl border border-gray-100 shadow-[0_2px_10px_-3px_rgba(0,0,0,0.03)] hover:shadow-[0_8px_20px_-3px_rgba(0,0,0,0.08)] hover:-translate-y-1 transition-all text-left flex flex-col justify-between h-28 group">
-                  <div>
-                    <span className="text-[10px] text-gray-400 font-medium mb-1 block">Select</span>
-                    <p className="text-sm font-semibold text-gray-800 leading-tight group-hover:text-blue-600 transition-colors">{opt.label}</p>
-                  </div>
-                  <div className="flex justify-between items-end mt-2">
-                    {opt.icon}
-                    <ArrowRight size={14} className="text-gray-300 group-hover:text-blue-500 transition-colors" />
-                  </div>
-                </motion.button>
-              ))}
-            </AnimatePresence>
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 w-full max-w-3xl px-1 sm:px-4">
+            {(() => {
+              if (step === 'faculty') return MIU_DATA.faculties.map(f => ({ label: f, icon: <Building2 className="w-5 h-5 text-gray-400" />, value: f, type: 'faculty' }));
+              if (step === 'department') return (MIU_DATA.departments[selections.faculty as keyof typeof MIU_DATA.departments] || []).map(d => ({ label: d, icon: <BookOpen className="w-5 h-5 text-gray-400" />, value: d, type: 'department' }));
+              if (step === 'level') return MIU_DATA.levels.map(l => ({ label: `${l} Level`, icon: <GraduationCap className="w-5 h-5 text-gray-400" />, value: l, type: 'level' }));
+              if (step === 'semester') return MIU_DATA.semesters.map(s => ({ label: `Semester ${s}`, icon: <Calendar className="w-5 h-5 text-gray-400" />, value: s, type: 'semester' }));
+              return [];
+            })().map((opt, idx) => (
+              <motion.button key={opt.value} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: idx * 0.05 }} onClick={() => handleSelection(opt.type as keyof typeof selections, opt.value)} className="bg-white p-4 rounded-2xl border border-gray-100 shadow-[0_2px_10px_-3px_rgba(0,0,0,0.03)] hover:shadow-[0_8px_20px_-3px_rgba(0,0,0,0.08)] hover:-translate-y-1 transition-all text-left flex flex-col justify-between h-28 group">
+                <div>
+                  <span className="text-[10px] text-gray-400 font-medium mb-1 block">Select</span>
+                  <p className="text-sm font-semibold text-gray-800 leading-tight group-hover:text-blue-600 transition-colors">{opt.label}</p>
+                </div>
+                <div className="flex justify-between items-end mt-2">
+                  {opt.icon}
+                  <ArrowRight size={14} className="text-gray-300 group-hover:text-blue-500 transition-colors" />
+                </div>
+              </motion.button>
+            ))}
           </div>
         )}
       </main>

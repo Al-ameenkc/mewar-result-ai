@@ -4,8 +4,9 @@ import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { 
   ArrowLeft, School, Clock, ChevronRight, 
-  Trash2, BrainCircuit, Calendar, FileText 
+  Trash2, BrainCircuit, Calendar, FileText, Loader2
 } from 'lucide-react';
+import { createClient } from '@/utils/supabase/client';
 
 type HistoryItem = {
   id: string;
@@ -19,15 +20,68 @@ type HistoryItem = {
   courses: Array<{ code: string; title: string; units: number }>;
 };
 
+const HISTORY_CACHE_TTL_MS = 1000 * 60 * 2;
+
 export default function AnalysisHistory() {
   const router = useRouter();
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const supabase = createClient();
 
   useEffect(() => {
-    const saved = localStorage.getItem('miu_analysis_history');
-    if (saved) {
-      setHistory(JSON.parse(saved));
-    }
+    const fetchHistory = async () => {
+      setLoading(true);
+      const { data: { session } } = await supabase.auth.getSession();
+      
+      if (session?.user) {
+        setIsLoggedIn(true);
+        const userCacheKey = `miu_history_cache_${session.user.id}`;
+        const cachedRaw = localStorage.getItem(userCacheKey);
+        if (cachedRaw) {
+          try {
+            const cached = JSON.parse(cachedRaw) as { ts: number; data: HistoryItem[] };
+            if (Date.now() - cached.ts < HISTORY_CACHE_TTL_MS && Array.isArray(cached.data)) {
+              setHistory(cached.data);
+              setLoading(false);
+            }
+          } catch {
+            localStorage.removeItem(userCacheKey);
+          }
+        }
+
+        const { data, error } = await supabase
+          .from('analysis_sessions')
+          .select('*')
+          .eq('user_id', session.user.id)
+          .order('created_at', { ascending: false });
+          
+        if (!error && data) {
+          // Map DB columns back to frontend shape
+          const formatted = data.map(dbItem => ({
+            id: dbItem.id,
+            date: new Date(dbItem.created_at).toLocaleDateString(),
+            faculty: dbItem.faculty,
+            department: dbItem.department,
+            level: dbItem.level,
+            semester: dbItem.semester,
+            assessmentType: dbItem.assessment_type,
+            scores: dbItem.scores,
+            courses: dbItem.courses
+          }));
+          setHistory(formatted);
+          localStorage.setItem(userCacheKey, JSON.stringify({ ts: Date.now(), data: formatted }));
+        } else {
+          setHistory([]);
+        }
+      } else {
+        setIsLoggedIn(false);
+        setHistory([]);
+      }
+      setLoading(false);
+    };
+    
+    fetchHistory();
   }, []);
 
   const viewAnalysis = (item: HistoryItem) => {
@@ -35,11 +89,15 @@ export default function AnalysisHistory() {
     router.push('/analytics');
   };
 
-  const deleteHistory = (id: string, e: React.MouseEvent) => {
+  const deleteHistory = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
+    
+    // Optimistic UI update
     const updated = history.filter(item => item.id !== id);
     setHistory(updated);
-    localStorage.setItem('miu_analysis_history', JSON.stringify(updated));
+
+    // Delete from Supabase
+    await supabase.from('analysis_sessions').delete().eq('id', id);
   };
 
   return (
@@ -112,6 +170,32 @@ export default function AnalysisHistory() {
                 </div>
               </div>
             ))}
+          </div>
+        ) : loading ? (
+          <div className="bg-white/80 backdrop-blur-xl rounded-[32px] border border-dashed border-gray-200 p-20 flex flex-col items-center text-center shadow-sm">
+             <div className="w-16 h-16 bg-gray-50 rounded-full flex items-center justify-center mb-4">
+               <Loader2 size={32} className="text-blue-500 animate-spin" />
+             </div>
+             <h2 className="text-xl font-semibold text-gray-900">Fetching History</h2>
+             <p className="text-gray-500 text-sm mt-2 max-w-sm leading-relaxed">
+               Loading your past AI predictions and analysis reports.
+             </p>
+          </div>
+        ) : !isLoggedIn ? (
+          <div className="bg-white/80 backdrop-blur-xl rounded-[32px] border border-dashed border-gray-200 p-20 flex flex-col items-center text-center shadow-sm">
+            <div className="w-16 h-16 bg-gray-50 rounded-full flex items-center justify-center mb-4">
+              <Clock size={32} className="text-gray-300" />
+            </div>
+            <h2 className="text-xl font-semibold text-gray-900">Login Required</h2>
+            <p className="text-gray-500 text-sm mt-2 max-w-sm leading-relaxed">
+              Please login to view your personal analysis history.
+            </p>
+            <button
+              onClick={() => router.push('/')}
+              className="mt-8 px-8 py-3 bg-black text-white rounded-full text-sm font-medium hover:bg-gray-800 transition-all shadow-lg shadow-black/10"
+            >
+              Go to Home
+            </button>
           </div>
         ) : (
           <div className="bg-white/80 backdrop-blur-xl rounded-[32px] border border-dashed border-gray-200 p-20 flex flex-col items-center text-center shadow-sm">

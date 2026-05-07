@@ -5,8 +5,11 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { 
   School, Plus, Save, X, Edit2, Trash2, 
   BookOpen, Building2, GraduationCap, Calendar, Hash, FileText,
-  Search, Filter
+  Search, Filter, Loader2, LogOut, ChevronDown, CheckCircle2, ChevronRight
 } from 'lucide-react';
+import { createClient } from '@/utils/supabase/client';
+import { logoutAdmin } from '../actions';
+import { useRouter } from 'next/navigation';
 
 // --- Types ---
 type Course = {
@@ -18,7 +21,17 @@ type Course = {
   code: string;
   title: string;
   units: number;
+  max_exam: number;
+  max_ca: number;
+  max_attendance: number;
 };
+
+type SupabaseError = {
+  message?: string;
+};
+
+const ADMIN_COURSES_CACHE_KEY = 'miu_admin_courses_cache_v1';
+const ADMIN_COURSES_CACHE_TTL_MS = 1000 * 60 * 5;
 
 // --- Base MIU Structural Data ---
 const MIU_DATA = {
@@ -33,10 +46,47 @@ const MIU_DATA = {
   semesters: ['1', '2'],
 };
 
+const NativeSelect = ({ 
+  name, 
+  value, 
+  options, 
+  icon: Icon, 
+  label, 
+  disabled = false,
+  onChange
+}: { 
+  name: string, value: string, options: string[], icon: any, label: string, disabled?: boolean, onChange: (e: any) => void
+}) => {
+  return (
+    <div className="relative">
+      <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5"><Icon size={12}/> {label}</label>
+      <div className="relative">
+        <select 
+          name={name}
+          value={value}
+          onChange={onChange}
+          disabled={disabled}
+          className={`w-full h-11 px-4 pr-10 text-sm font-semibold bg-gray-50 border border-gray-200 rounded-xl appearance-none outline-none transition-all text-gray-900 ${disabled ? 'opacity-50 cursor-not-allowed' : 'hover:border-black hover:bg-white focus:ring-2 focus:ring-black/5 focus:border-black'}`}
+        >
+          <option value="" disabled>Select {label}</option>
+          {options.map(opt => (
+            <option key={opt} value={opt}>
+              {name === 'level' ? `${opt}L` : name === 'semester' ? `Semester ${opt}` : opt}
+            </option>
+          ))}
+        </select>
+        <ChevronDown size={14} className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+      </div>
+    </div>
+  );
+};
+
 export default function AdminCoursePortal() {
+  const router = useRouter();
   const [courses, setCourses] = useState<Course[]>([]);
   const [isEditing, setIsEditing] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   
   // Form State
   const [formData, setFormData] = useState({
@@ -46,15 +96,19 @@ export default function AdminCoursePortal() {
     semester: '',
     code: '',
     title: '',
-    units: 1
+    units: 1,
+    max_exam: 60,
+    max_ca: 30,
+    max_attendance: 10
   });
 
-  // Load courses from localStorage on mount
+  const [activeDropdown, setActiveDropdown] = useState<string | null>(null);
+
+  // Close dropdowns on outside click (simplified)
   useEffect(() => {
-    const saved = localStorage.getItem('miu_courses');
-    if (saved) {
-      setCourses(JSON.parse(saved));
-    }
+    const handleClick = () => setActiveDropdown(null);
+    document.addEventListener('click', handleClick);
+    return () => document.removeEventListener('click', handleClick);
   }, []);
 
   // Handle Input Changes
@@ -67,24 +121,143 @@ export default function AdminCoursePortal() {
     });
   };
 
+  const supabase = createClient();
+  const isMissingColumnError = (error: SupabaseError | null) =>
+    error?.message?.includes("Could not find the") ?? false;
+
+  const normalizeCourse = (course: Partial<Course>): Course => ({
+    id: course.id ?? '',
+    faculty: course.faculty ?? '',
+    department: course.department ?? '',
+    level: course.level ?? '',
+    semester: course.semester ?? '',
+    code: course.code ?? '',
+    title: course.title ?? '',
+    units: Number(course.units ?? 1),
+    max_exam: Number(course.max_exam ?? 60),
+    max_ca: Number(course.max_ca ?? 30),
+    max_attendance: Number(course.max_attendance ?? 10),
+  });
+
+  const persistCoursesCache = (nextCourses: Course[]) => {
+    localStorage.setItem(ADMIN_COURSES_CACHE_KEY, JSON.stringify({ ts: Date.now(), data: nextCourses }));
+  };
+
+  const fetchCourses = async () => {
+    setLoading(true);
+    const cachedRaw = localStorage.getItem(ADMIN_COURSES_CACHE_KEY);
+    if (cachedRaw) {
+      try {
+        const cached = JSON.parse(cachedRaw) as { ts: number; data: Course[] };
+        if (Date.now() - cached.ts < ADMIN_COURSES_CACHE_TTL_MS && Array.isArray(cached.data)) {
+          setCourses(cached.data);
+          setLoading(false);
+        }
+      } catch {
+        localStorage.removeItem(ADMIN_COURSES_CACHE_KEY);
+      }
+    }
+
+    const { data: dbCourses, error } = await supabase.from('courses').select('*').order('created_at', { ascending: false });
+    if (!error && dbCourses) {
+      const normalized = (dbCourses as Partial<Course>[]).map(normalizeCourse);
+      setCourses(normalized);
+      persistCoursesCache(normalized);
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    fetchCourses();
+  }, []);
+
+
   // Submit Form (Create or Update)
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    const updatedCourses = isEditing && editingId
-      ? courses.map(c => c.id === editingId ? { ...formData, id: editingId, units: Number(formData.units) } : c)
-      : [{ ...formData, id: Date.now().toString(), units: Number(formData.units) }, ...courses];
-
-    // Update State
-    setCourses(updatedCourses);
+    const totalMarks = Number(formData.max_exam) + Number(formData.max_ca) + Number(formData.max_attendance);
+    if (totalMarks !== 100) {
+      alert(`Error: The course max marks must sum up to exactly 100. Currently they sum to ${totalMarks} (${formData.max_exam} + ${formData.max_ca} + ${formData.max_attendance}).`);
+      return;
+    }
     
-    // Save to LocalStorage for the Home Page to access
-    localStorage.setItem('miu_courses', JSON.stringify(updatedCourses));
+    if (isEditing && editingId) {
+       const fullPayload = {
+         ...formData,
+         units: Number(formData.units),
+         max_exam: Number(formData.max_exam),
+         max_ca: Number(formData.max_ca),
+         max_attendance: Number(formData.max_attendance),
+       };
+
+       let { error } = await supabase.from('courses').update(fullPayload).eq('id', editingId);
+
+       if (isMissingColumnError(error)) {
+         const legacyPayload = {
+           faculty: formData.faculty,
+           department: formData.department,
+           level: formData.level,
+           semester: formData.semester,
+           code: formData.code,
+           title: formData.title,
+           units: Number(formData.units),
+         };
+         const fallback = await supabase.from('courses').update(legacyPayload).eq('id', editingId);
+         error = fallback.error;
+       }
+
+       if (!error) {
+         const updatedCourses = courses.map(c => c.id === editingId ? normalizeCourse({
+           ...c,
+           ...formData,
+           id: editingId,
+           units: Number(formData.units),
+         }) : c);
+         setCourses(updatedCourses);
+         persistCoursesCache(updatedCourses);
+       } else {
+         alert(`Failed to update course: ${error.message}`);
+       }
+    } else {
+       const fullPayload = {
+         ...formData,
+         units: Number(formData.units),
+         max_exam: Number(formData.max_exam),
+         max_ca: Number(formData.max_ca),
+         max_attendance: Number(formData.max_attendance),
+       };
+
+       let { data, error } = await supabase.from('courses').insert([fullPayload]).select().single();
+
+       if (isMissingColumnError(error)) {
+         const legacyPayload = {
+           faculty: formData.faculty,
+           department: formData.department,
+           level: formData.level,
+           semester: formData.semester,
+           code: formData.code,
+           title: formData.title,
+           units: Number(formData.units),
+         };
+         const fallback = await supabase.from('courses').insert([legacyPayload]).select().single();
+         data = fallback.data;
+         error = fallback.error;
+       }
+
+       if (!error && data) {
+         const updatedCourses = [normalizeCourse(data as Partial<Course>), ...courses];
+         setCourses(updatedCourses);
+         persistCoursesCache(updatedCourses);
+       } else if (error) {
+         alert(`Failed to create course: ${error.message}`);
+       }
+    }
 
     // Reset UI State
     setIsEditing(false);
     setEditingId(null);
-    setFormData(prev => ({ ...prev, code: '', title: '', units: 1 }));
+    setFormData(prev => ({ ...prev, code: '', title: '', units: 1, max_exam: 60, max_ca: 30, max_attendance: 10 }));
   };
 
   // Edit Course
@@ -96,25 +269,31 @@ export default function AdminCoursePortal() {
       semester: course.semester,
       code: course.code,
       title: course.title,
-      units: course.units
+      units: course.units,
+      max_exam: course.max_exam ?? 60,
+      max_ca: course.max_ca ?? 30,
+      max_attendance: course.max_attendance ?? 10
     });
     setIsEditing(true);
     setEditingId(course.id);
   };
 
   // Delete Course
-  const handleDelete = (id: string) => {
+  const handleDelete = async (id: string) => {
     if (window.confirm("Are you sure you want to remove this course?")) {
-      const updatedCourses = courses.filter(course => course.id !== id);
-      setCourses(updatedCourses);
-      localStorage.setItem('miu_courses', JSON.stringify(updatedCourses));
+      const { error } = await supabase.from('courses').delete().eq('id', id);
+      if (!error) {
+        const updatedCourses = courses.filter(course => course.id !== id);
+        setCourses(updatedCourses);
+        persistCoursesCache(updatedCourses);
+      }
     }
   };
 
   const cancelEdit = () => {
     setIsEditing(false);
     setEditingId(null);
-    setFormData(prev => ({ ...prev, code: '', title: '', units: 1 }));
+    setFormData(prev => ({ ...prev, code: '', title: '', units: 1, max_exam: 60, max_ca: 30, max_attendance: 10 }));
   };
 
   return (
@@ -138,6 +317,9 @@ export default function AdminCoursePortal() {
             <div className="w-2 h-2 rounded-full bg-green-500"></div>
             Admin Active
           </div>
+          <button onClick={async () => { await logoutAdmin(); router.refresh(); }} className="flex items-center gap-2 text-sm font-medium text-red-600 hover:bg-red-50 px-4 py-2 rounded-full border border-red-100 transition-all">
+            <LogOut size={14} /> Logout
+          </button>
         </div>
       </nav>
 
@@ -156,39 +338,11 @@ export default function AdminCoursePortal() {
 
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="space-y-3">
-                <div>
-                  <label className="text-xs font-semibold text-gray-600 mb-1 flex items-center gap-1"><Building2 size={12}/> Faculty</label>
-                  <select name="faculty" value={formData.faculty} onChange={handleChange} required className="w-full h-10 px-3 text-sm bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-black focus:ring-1 focus:ring-black transition-all">
-                    <option value="" disabled>Select Faculty</option>
-                    {MIU_DATA.faculties.map(f => <option key={f} value={f}>{f}</option>)}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="text-xs font-semibold text-gray-600 mb-1 flex items-center gap-1"><BookOpen size={12}/> Department</label>
-                  <select name="department" value={formData.department} onChange={handleChange} required disabled={!formData.faculty} className="w-full h-10 px-3 text-sm bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-black focus:ring-1 focus:ring-black transition-all disabled:opacity-50">
-                    <option value="" disabled>Select Department</option>
-                    {formData.faculty && (MIU_DATA.departments[formData.faculty as keyof typeof MIU_DATA.departments] || []).map(d => (
-                      <option key={d} value={d}>{d}</option>
-                    ))}
-                  </select>
-                </div>
-
+                <NativeSelect name="faculty" label="Faculty" icon={Building2} options={MIU_DATA.faculties} value={formData.faculty} onChange={handleChange} />
+                <NativeSelect name="department" label="Department" icon={BookOpen} options={MIU_DATA.departments[formData.faculty as keyof typeof MIU_DATA.departments] || []} value={formData.department} disabled={!formData.faculty} onChange={handleChange} />
                 <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-xs font-semibold text-gray-600 mb-1 flex items-center gap-1"><GraduationCap size={12}/> Level</label>
-                    <select name="level" value={formData.level} onChange={handleChange} required className="w-full h-10 px-3 text-sm bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-black focus:ring-1 focus:ring-black transition-all">
-                      <option value="" disabled>Level</option>
-                      {MIU_DATA.levels.map(l => <option key={l} value={l}>{l}L</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-xs font-semibold text-gray-600 mb-1 flex items-center gap-1"><Calendar size={12}/> Semester</label>
-                    <select name="semester" value={formData.semester} onChange={handleChange} required className="w-full h-10 px-3 text-sm bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-black focus:ring-1 focus:ring-black transition-all">
-                      <option value="" disabled>Semester</option>
-                      {MIU_DATA.semesters.map(s => <option key={s} value={s}>Semester {s}</option>)}
-                    </select>
-                  </div>
+                  <NativeSelect name="level" label="Level" icon={GraduationCap} options={MIU_DATA.levels} value={formData.level} onChange={handleChange} />
+                  <NativeSelect name="semester" label="Semester" icon={Calendar} options={MIU_DATA.semesters} value={formData.semester} onChange={handleChange} />
                 </div>
               </div>
 
@@ -197,18 +351,50 @@ export default function AdminCoursePortal() {
               <div className="space-y-3">
                 <div className="grid grid-cols-3 gap-3">
                   <div className="col-span-2">
-                    <label className="text-xs font-semibold text-gray-600 mb-1 flex items-center gap-1"><Hash size={12}/> Course Code</label>
-                    <input type="text" name="code" value={formData.code} onChange={handleChange} required placeholder="e.g. SEN414" className="w-full h-10 px-3 text-sm bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-black focus:ring-1 focus:ring-black transition-all" />
+                    <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5"><Hash size={12}/> Course Code</label>
+                    <input type="text" name="code" value={formData.code} onChange={handleChange} required placeholder="e.g. SEN414" className="w-full h-11 px-4 text-sm font-semibold text-gray-900 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-black focus:bg-white focus:ring-2 focus:ring-black/5 transition-all uppercase" />
                   </div>
                   <div>
-                    <label className="text-xs font-semibold text-gray-600 mb-1 flex items-center gap-1"><FileText size={12}/> Units</label>
-                    <input type="number" name="units" value={formData.units} onChange={handleChange} required min="1" max="6" className="w-full h-10 px-3 text-sm bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-black focus:ring-1 focus:ring-black transition-all" />
+                    <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5"><FileText size={12}/> Units</label>
+                    <input type="number" name="units" value={formData.units} onChange={handleChange} required min="1" max="6" className="w-full h-11 px-4 text-sm font-semibold text-gray-900 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-black focus:bg-white focus:ring-2 focus:ring-black/5 transition-all text-center" />
                   </div>
                 </div>
 
                 <div>
-                  <label className="text-xs font-semibold text-gray-600 mb-1 flex items-center gap-1"><BookOpen size={12}/> Course Title</label>
-                  <input type="text" name="title" value={formData.title} onChange={handleChange} required placeholder="e.g. Human Computer Interaction" className="w-full h-10 px-3 text-sm bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-black focus:ring-1 focus:ring-black transition-all" />
+                  <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5"><BookOpen size={12}/> Course Title</label>
+                  <input type="text" name="title" value={formData.title} onChange={handleChange} required placeholder="e.g. Human Computer Interaction" className="w-full h-11 px-4 text-sm font-semibold text-gray-900 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-black focus:bg-white focus:ring-2 focus:ring-black/5 transition-all" />
+                </div>
+              </div>
+
+              {/* Assessment Grading Configuration */}
+              <div className="bg-blue-50/50 border border-blue-100 rounded-2xl p-4 mt-6">
+                <div className="mb-3">
+                  <h4 className="text-xs font-bold text-blue-900 uppercase tracking-wider flex items-center gap-1.5">
+                    <CheckCircle2 size={14} className="text-blue-500"/> Grading Matrix
+                  </h4>
+                  <p className="text-[10px] text-blue-600 font-medium mt-0.5">Define max marks. Total must equal exactly 100.</p>
+                </div>
+                
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="bg-white rounded-xl p-2.5 border border-blue-100/50 shadow-sm flex flex-col justify-center items-center">
+                    <label className="text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-1 text-center">Exam</label>
+                    <input type="number" name="max_exam" value={formData.max_exam} onChange={handleChange} required min="0" max="100" className="w-full text-center font-bold text-lg text-gray-900 bg-transparent outline-none" />
+                  </div>
+                  <div className="bg-white rounded-xl p-2.5 border border-blue-100/50 shadow-sm flex flex-col justify-center items-center">
+                    <label className="text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-1 text-center">CA</label>
+                    <input type="number" name="max_ca" value={formData.max_ca} onChange={handleChange} required min="0" max="100" className="w-full text-center font-bold text-lg text-gray-900 bg-transparent outline-none" />
+                  </div>
+                  <div className="bg-white rounded-xl p-2.5 border border-blue-100/50 shadow-sm flex flex-col justify-center items-center">
+                    <label className="text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-1 text-center">ATT</label>
+                    <input type="number" name="max_attendance" value={formData.max_attendance} onChange={handleChange} required min="0" max="100" className="w-full text-center font-bold text-lg text-gray-900 bg-transparent outline-none" />
+                  </div>
+                </div>
+                
+                <div className="mt-3 flex items-center justify-between px-1">
+                  <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Total Sum</div>
+                  <div className={`text-sm font-bold flex items-center gap-1 ${Number(formData.max_exam) + Number(formData.max_ca) + Number(formData.max_attendance) === 100 ? 'text-emerald-600' : 'text-red-500'}`}>
+                    {Number(formData.max_exam) + Number(formData.max_ca) + Number(formData.max_attendance)} / 100
+                  </div>
                 </div>
               </div>
 
@@ -243,7 +429,12 @@ export default function AdminCoursePortal() {
             </div>
 
             <div className="flex-1 overflow-auto">
-              {courses.length === 0 ? (
+              {loading ? (
+                <div className="h-full flex flex-col items-center justify-center text-gray-400 p-12">
+                   <Loader2 size={32} className="animate-spin mb-4 text-blue-500" />
+                   <p className="text-sm font-medium">Loading courses...</p>
+                </div>
+              ) : courses.length === 0 ? (
                 <div className="h-full flex flex-col items-center justify-center text-gray-400 p-12">
                   <BookOpen size={48} className="mb-4 opacity-20" />
                   <p className="text-sm font-medium">No courses registered yet.</p>
@@ -277,6 +468,11 @@ export default function AdminCoursePortal() {
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-xs text-gray-500">
                             {course.level}L • {course.department}
+                            <div className="mt-1 flex items-center gap-2 text-[9px] font-bold text-gray-400">
+                               <span title="Exam Max Mark">EXM:{course.max_exam ?? 60}</span>
+                               <span title="CA Max Mark">CA:{course.max_ca ?? 30}</span>
+                               <span title="Attendance Max Mark">ATT:{course.max_attendance ?? 10}</span>
+                            </div>
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-center">
                             <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-blue-50 text-blue-600 text-xs font-bold">
