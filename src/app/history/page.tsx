@@ -20,6 +20,18 @@ type HistoryItem = {
   courses: Array<{ code: string; title: string; units: number }>;
 };
 
+type AnalysisSessionRow = {
+  id: string;
+  created_at: string;
+  faculty: string;
+  department: string;
+  level: string;
+  semester: string;
+  assessment_type: string;
+  scores: Record<string, number>;
+  courses: Array<{ code: string; title: string; units: number }>;
+};
+
 const HISTORY_CACHE_TTL_MS = 1000 * 60 * 2;
 
 export default function AnalysisHistory() {
@@ -58,7 +70,7 @@ export default function AnalysisHistory() {
           
         if (!error && data) {
           // Map DB columns back to frontend shape
-          const formatted = data.map(dbItem => ({
+          const formatted = (data as AnalysisSessionRow[]).map((dbItem) => ({
             id: dbItem.id,
             date: new Date(dbItem.created_at).toLocaleDateString(),
             faculty: dbItem.faculty,
