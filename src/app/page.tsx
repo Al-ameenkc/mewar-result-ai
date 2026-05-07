@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
+import type { Session } from '@supabase/supabase-js';
 import { 
   Sparkles, ArrowRight, BookOpen, GraduationCap, Building2, Calendar,
   School, ArrowLeft, FileText, Mail, Lock, X, Loader2, Eye, EyeOff, AlertCircle
@@ -90,13 +91,13 @@ export default function ModernChatBoard() {
     fetchCourses();
     
     // Check initial session
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    supabase.auth.getSession().then(({ data: { session } }: { data: { session: Session | null } }) => {
       setIsLoggedIn(!!session);
       setUserEmail(session?.user?.email || null);
     });
 
     // Listen for auth changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event: string, session: Session | null) => {
       setIsLoggedIn(!!session);
       setUserEmail(session?.user?.email || null);
     });
