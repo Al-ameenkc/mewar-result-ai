@@ -494,7 +494,6 @@ export default function ModernChatBoard() {
                     {step === 'department' && `Choose your Department in ${selections.faculty}...`}
                     {step === 'level' && "What is your current academic level?"}
                     {step === 'semester' && "Which semester's results are we analyzing?"}
-                    {step === 'input-scores' && "Enter your CA and Exam scores for each course."}
                   </span>
                 </div>
                 <div className="flex flex-wrap gap-2 sm:justify-end max-w-full">
