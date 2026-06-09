@@ -39,3 +39,15 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# project documentation (thesis/report assets — keep repo web-focused)
+# docs/ ignores the whole folder; explicit entries below document what lives there.
+docs/
+docs/**/*.py
+docs/**/*.html
+docs/diagrams/
+docs/diagrams/**/*.png
+docs/screenshots/
+docs/screenshots/**/*.png
+*.docx
+*.pdf
