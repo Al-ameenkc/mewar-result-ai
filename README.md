@@ -115,8 +115,9 @@ Apply database policies from `supabase/migrations/001_rls_policies.sql` in your 
 **Option A — Supabase SQL Editor (no local keys needed):**
 
 1. Open your Supabase project → **SQL Editor**
-2. Run `supabase/migrations/001_rls_policies.sql`
-3. Run `supabase/migrations/002_seed_courses.sql` (adds 9 courses per department/level/semester)
+2. Run `supabase/migrations/000_courses_schema.sql`
+3. Run `supabase/migrations/001_rls_policies.sql`
+4. Run `supabase/migrations/002_seed_courses.sql` (adds 9 courses per department/level/semester)
 
 **Option B — Local script (requires `SUPABASE_SERVICE_ROLE_KEY` in `.env.local`):**
 

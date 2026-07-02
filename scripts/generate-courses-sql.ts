@@ -29,8 +29,14 @@ function main() {
     .join(',\n');
 
   const sql = `-- Mewar Result AI — seed course catalog (${stats.totalCourses} courses)
--- Run in Supabase SQL Editor AFTER 001_rls_policies.sql
+-- Run in Supabase SQL Editor AFTER:
+--   1) 000_courses_schema.sql
+--   2) 001_rls_policies.sql
 -- Safe to re-run: clears generated catalog rows first.
+
+alter table public.courses add column if not exists max_exam integer not null default 60;
+alter table public.courses add column if not exists max_ca integer not null default 30;
+alter table public.courses add column if not exists max_attendance integer not null default 10;
 
 delete from public.courses
 where code ~ '^[A-Z]{3}[1-4][0-9]{2}$';
