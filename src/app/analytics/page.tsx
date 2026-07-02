@@ -5,70 +5,41 @@ import { useRouter } from 'next/navigation';
 import { 
   ArrowLeft, Sparkles, AlertCircle, Download, PieChart as PieIcon, BarChart3, Activity
 } from 'lucide-react';
-
-type SessionData = {
-  faculty: string;
-  department: string;
-  level: string;
-  semester: string;
-  scores: Record<string, { ca: number; exam: number }>;
-  courses: Array<{
-    code: string;
-    title: string;
-    units: number;
-    caScore?: number;
-    examScore?: number;
-    max_ca?: number;
-    max_exam?: number;
-    totalScore?: number;
-    totalMax?: number;
-    caPercentage?: number;
-    examPercentage?: number;
-    totalPercentage?: number;
-  }>;
-  aiAnalysis?: {
-    caAnalysis: {
-      average: string;
-      diagnosticSummary: string;
-      improvementCourses: string[];
-      strengthCourses: string[];
-    };
-    examAnalysis: {
-      average: string;
-      diagnosticSummary: string;
-      improvementCourses: string[];
-      strengthCourses: string[];
-    };
-    totalAnalysis: {
-      currentGpa: string;
-      standing: string;
-      diagnosticSummary: string;
-      improvementCourses: string[];
-      strengthCourses: string[];
-      studyTips: string[];
-      nextSemesterPrediction: string;
-    };
-  };
-};
+import { createClient } from '@/utils/supabase/client';
+import type { SessionData } from '@/types/academic';
 
 export default function PersonalAnalytics() {
   const router = useRouter();
   const [data, setData] = useState<SessionData | null>(null);
+  const supabase = createClient();
 
   useEffect(() => {
-    const session = localStorage.getItem('miu_current_session');
-    if (session) {
-      const parsed = JSON.parse(session) as SessionData;
+    const loadSession = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.user) {
+        router.replace('/?login=required');
+        return;
+      }
+
+      const stored = localStorage.getItem('miu_current_session');
+      if (!stored) {
+        router.replace('/');
+        return;
+      }
+
+      const parsed = JSON.parse(stored) as SessionData;
       const hasEmpty = parsed.courses.some(
         (c) => c.caScore === null || c.caScore === undefined || c.examScore === null || c.examScore === undefined
       );
       if (hasEmpty) {
-        router.push('/');
+        router.replace('/');
         return;
       }
       setData(parsed);
-    }
-  }, [router]);
+    };
+
+    loadSession();
+  }, [router, supabase]);
 
   const exportPDF = () => {
     window.print();

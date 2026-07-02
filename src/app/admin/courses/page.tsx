@@ -9,42 +9,13 @@ import {
 } from 'lucide-react';
 import { createClient } from '@/utils/supabase/client';
 import { logoutAdmin } from '../actions';
+import { createCourse, deleteCourse, updateCourse } from '../course-actions';
 import { useRouter } from 'next/navigation';
-
-// --- Types ---
-type Course = {
-  id: string;
-  faculty: string;
-  department: string;
-  level: string;
-  semester: string;
-  code: string;
-  title: string;
-  units: number;
-  max_exam: number;
-  max_ca: number;
-  max_attendance: number;
-};
-
-type SupabaseError = {
-  message?: string;
-};
+import type { Course } from '@/types/academic';
+import { MIU_DATA } from '@/data/miu-structure';
 
 const ADMIN_COURSES_CACHE_KEY = 'miu_admin_courses_cache_v1';
 const ADMIN_COURSES_CACHE_TTL_MS = 1000 * 60 * 5;
-
-// --- Base MIU Structural Data ---
-const MIU_DATA = {
-  faculties: ['Computing', 'Sciences', 'Management', 'Law'],
-  departments: {
-    'Computing': ['Software Engineering', 'Cyber Security', 'Computer Science'],
-    'Sciences': ['Biotechnology', 'Industrial Chemistry', 'Physics with Electronics'],
-    'Management': ['Accounting', 'Public Administration', 'Economics', 'Entrepreneurship', 'Banking and Finance', 'International Relations', 'Political Science', 'Sociology', 'Procurement Management'],
-    'Law': ['Commercial Law', 'Islamic Law', 'International Law'],
-  },
-  levels: ['100', '200', '300', '400'],
-  semesters: ['1', '2'],
-};
 
 const NativeSelect = ({ 
   name, 
@@ -122,8 +93,6 @@ export default function AdminCoursePortal() {
   };
 
   const supabase = createClient();
-  const isMissingColumnError = (error: SupabaseError | null) =>
-    error?.message?.includes("Could not find the") ?? false;
 
   const normalizeCourse = (course: Partial<Course>): Course => ({
     id: course.id ?? '',
@@ -184,30 +153,21 @@ export default function AdminCoursePortal() {
     
     if (isEditing && editingId) {
        const fullPayload = {
-         ...formData,
+         faculty: formData.faculty,
+         department: formData.department,
+         level: formData.level,
+         semester: formData.semester,
+         code: formData.code,
+         title: formData.title,
          units: Number(formData.units),
          max_exam: Number(formData.max_exam),
          max_ca: Number(formData.max_ca),
          max_attendance: Number(formData.max_attendance),
        };
 
-       let { error } = await supabase.from('courses').update(fullPayload).eq('id', editingId);
+       const result = await updateCourse(editingId, fullPayload);
 
-       if (isMissingColumnError(error)) {
-         const legacyPayload = {
-           faculty: formData.faculty,
-           department: formData.department,
-           level: formData.level,
-           semester: formData.semester,
-           code: formData.code,
-           title: formData.title,
-           units: Number(formData.units),
-         };
-         const fallback = await supabase.from('courses').update(legacyPayload).eq('id', editingId);
-         error = fallback.error;
-       }
-
-       if (!error) {
+       if (result.success) {
          const updatedCourses = courses.map(c => c.id === editingId ? normalizeCourse({
            ...c,
            ...formData,
@@ -217,40 +177,33 @@ export default function AdminCoursePortal() {
          setCourses(updatedCourses);
          persistCoursesCache(updatedCourses);
        } else {
-         alert(`Failed to update course: ${error.message}`);
+         alert(`Failed to update course: ${result.error}`);
        }
     } else {
        const fullPayload = {
-         ...formData,
+         faculty: formData.faculty,
+         department: formData.department,
+         level: formData.level,
+         semester: formData.semester,
+         code: formData.code,
+         title: formData.title,
          units: Number(formData.units),
          max_exam: Number(formData.max_exam),
          max_ca: Number(formData.max_ca),
          max_attendance: Number(formData.max_attendance),
        };
 
-       let { data, error } = await supabase.from('courses').insert([fullPayload]).select().single();
+       const result = await createCourse(fullPayload);
 
-       if (isMissingColumnError(error)) {
-         const legacyPayload = {
-           faculty: formData.faculty,
-           department: formData.department,
-           level: formData.level,
-           semester: formData.semester,
-           code: formData.code,
-           title: formData.title,
-           units: Number(formData.units),
-         };
-         const fallback = await supabase.from('courses').insert([legacyPayload]).select().single();
-         data = fallback.data;
-         error = fallback.error;
-       }
-
-       if (!error && data) {
-         const updatedCourses = [normalizeCourse(data as Partial<Course>), ...courses];
+       if (result.success && result.data?.id) {
+         const updatedCourses = [normalizeCourse({
+           ...fullPayload,
+           id: result.data.id,
+         }), ...courses];
          setCourses(updatedCourses);
          persistCoursesCache(updatedCourses);
-       } else if (error) {
-         alert(`Failed to create course: ${error.message}`);
+       } else if (!result.success) {
+         alert(`Failed to create course: ${result.error}`);
        }
     }
 
@@ -281,11 +234,13 @@ export default function AdminCoursePortal() {
   // Delete Course
   const handleDelete = async (id: string) => {
     if (window.confirm("Are you sure you want to remove this course?")) {
-      const { error } = await supabase.from('courses').delete().eq('id', id);
-      if (!error) {
+      const result = await deleteCourse(id);
+      if (result.success) {
         const updatedCourses = courses.filter(course => course.id !== id);
         setCourses(updatedCourses);
         persistCoursesCache(updatedCourses);
+      } else {
+        alert(result.error);
       }
     }
   };
@@ -338,11 +293,11 @@ export default function AdminCoursePortal() {
 
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="space-y-3">
-                <NativeSelect name="faculty" label="Faculty" icon={Building2} options={MIU_DATA.faculties} value={formData.faculty} onChange={handleChange} />
-                <NativeSelect name="department" label="Department" icon={BookOpen} options={MIU_DATA.departments[formData.faculty as keyof typeof MIU_DATA.departments] || []} value={formData.department} disabled={!formData.faculty} onChange={handleChange} />
+                <NativeSelect name="faculty" label="Faculty" icon={Building2} options={[...MIU_DATA.faculties]} value={formData.faculty} onChange={handleChange} />
+                <NativeSelect name="department" label="Department" icon={BookOpen} options={[...(MIU_DATA.departments[formData.faculty as keyof typeof MIU_DATA.departments] || [])]} value={formData.department} disabled={!formData.faculty} onChange={handleChange} />
                 <div className="grid grid-cols-2 gap-3">
-                  <NativeSelect name="level" label="Level" icon={GraduationCap} options={MIU_DATA.levels} value={formData.level} onChange={handleChange} />
-                  <NativeSelect name="semester" label="Semester" icon={Calendar} options={MIU_DATA.semesters} value={formData.semester} onChange={handleChange} />
+                  <NativeSelect name="level" label="Level" icon={GraduationCap} options={[...MIU_DATA.levels]} value={formData.level} onChange={handleChange} />
+                  <NativeSelect name="semester" label="Semester" icon={Calendar} options={[...MIU_DATA.semesters]} value={formData.semester} onChange={handleChange} />
                 </div>
               </div>
 

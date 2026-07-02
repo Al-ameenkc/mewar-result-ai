@@ -10,40 +10,14 @@ import {
 } from 'lucide-react';
 import { createClient } from '@/utils/supabase/client';
 import { generateAIAnalysis } from '@/app/actions/analysis';
-
-// --- Types ---
-type Step = 'faculty' | 'department' | 'level' | 'semester' | 'input-scores' | 'analyzing';
-
-type Course = {
-  id: string;
-  faculty: string;
-  department: string;
-  level: string;
-  semester: string;
-  code: string;
-  title: string;
-  units: number;
-  max_exam: number;
-  max_ca: number;
-  max_attendance: number;
-};
-type ScoreEntry = { ca: number | null; exam: number | null };
+import { saveAnalysisSession } from '@/app/actions/sessions';
+import type { Course, ScoreEntry, AIAnalysis } from '@/types/academic';
+import { MIU_DATA } from '@/data/miu-structure';
 
 const COURSES_CACHE_KEY = 'miu_courses_cache_v1';
 const COURSES_CACHE_TTL_MS = 1000 * 60 * 5;
 
-// --- Structural Data ---
-const MIU_DATA = {
-  faculties: ['Computing', 'Sciences', 'Management', 'Law'],
-  departments: {
-    'Computing': ['Software Engineering', 'Cyber Security', 'Computer Science'],
-    'Sciences': ['Biotechnology', 'Industrial Chemistry', 'Physics with Electronics'],
-    'Management': ['Accounting', 'Public Administration', 'Economics', 'Entrepreneurship', 'Banking and Finance', 'International Relations', 'Political Science', 'Sociology', 'Procurement Management'],
-    'Law': ['Commercial Law', 'Islamic Law', 'International Law'],
-  },
-  levels: [100, 200, 300, 400],
-  semesters: [1, 2],
-};
+type Step = 'faculty' | 'department' | 'level' | 'semester' | 'input-scores' | 'analyzing';
 
 export default function ModernChatBoard() {
   const router = useRouter();
@@ -199,7 +173,17 @@ export default function ModernChatBoard() {
       };
     });
 
-    const sessionData = {
+    const sessionData: {
+      id: string;
+      date: string;
+      faculty: string;
+      department: string;
+      level: string;
+      semester: string;
+      scores: Record<string, ScoreEntry>;
+      courses: typeof scoredCourses;
+      aiAnalysis: AIAnalysis | null;
+    } = {
       id: Date.now().toString(),
       date: new Date().toLocaleDateString(),
       faculty: selections.faculty,
@@ -208,50 +192,34 @@ export default function ModernChatBoard() {
       semester: selections.semester,
       scores: scores,
       courses: scoredCourses,
-      aiAnalysis: null as any
+      aiAnalysis: null,
     };
-    
-    // Call AI to generate assessment
-    setStep('analyzing');
-    const aiResult = await generateAIAnalysis(sessionData);
-    if (aiResult.success) {
-       sessionData.aiAnalysis = aiResult.analysis;
-    }
 
-    localStorage.setItem('miu_current_session', JSON.stringify(sessionData));
-
-    const payload = {
-      user_id: session.user.id,
+    const analysisInput = {
       faculty: selections.faculty,
       department: selections.department,
       level: selections.level,
       semester: selections.semester,
-      assessment_type: 'Combined',
       scores: scores,
-      courses: sessionData.courses,
-      ai_analysis: sessionData.aiAnalysis
+      courses: scoredCourses,
     };
-
-    let { error: saveError } = await supabase.from('analysis_sessions').insert(payload);
-
-    // Backward compatibility for older schemas that do not yet have ai_analysis.
-    if (saveError?.message?.includes("Could not find the 'ai_analysis' column")) {
-      const legacyPayload = {
-        user_id: session.user.id,
-        faculty: selections.faculty,
-        department: selections.department,
-        level: selections.level,
-        semester: selections.semester,
-        assessment_type: 'Combined',
-        scores: scores,
-        courses: sessionData.courses,
-      };
-      const fallbackResult = await supabase.from('analysis_sessions').insert(legacyPayload);
-      saveError = fallbackResult.error;
+    
+    // Call AI to generate assessment
+    setStep('analyzing');
+    const aiResult = await generateAIAnalysis(analysisInput);
+    if (!aiResult.success) {
+      alert(aiResult.error);
+      setStep('input-scores');
+      return;
     }
 
-    if (saveError) {
-      alert(`Could not save prediction to history: ${saveError.message}`);
+    sessionData.aiAnalysis = aiResult.analysis;
+
+    localStorage.setItem('miu_current_session', JSON.stringify(sessionData));
+
+    const saveResult = await saveAnalysisSession(analysisInput, sessionData.aiAnalysis);
+    if (!saveResult.success) {
+      alert(`Could not save prediction to history: ${saveResult.error}`);
       setStep('input-scores');
       return;
     }

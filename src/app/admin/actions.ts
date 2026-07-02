@@ -1,6 +1,22 @@
 'use server';
 
 import { cookies } from 'next/headers';
+import { headers } from 'next/headers';
+import {
+  ADMIN_SESSION_COOKIE,
+  createAdminSessionValue,
+  getAdminSessionMaxAge,
+} from '@/utils/auth/admin';
+import { checkRateLimit } from '@/utils/rate-limit';
+
+async function getClientIp(): Promise<string> {
+  const headerStore = await headers();
+  return (
+    headerStore.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+    headerStore.get('x-real-ip') ||
+    'unknown'
+  );
+}
 
 export async function verifyAdminKey(key: string) {
   const correctKey = process.env.MIU_ADMIN_KEY;
@@ -8,12 +24,18 @@ export async function verifyAdminKey(key: string) {
     throw new Error('Admin key is not configured on the server.');
   }
 
+  const ip = await getClientIp();
+  if (!checkRateLimit(`admin-login:${ip}`, 5, 15 * 60 * 1000)) {
+    return { success: false, error: 'Too many attempts. Please try again later.' };
+  }
+
   if (key === correctKey) {
     const cookieStore = await cookies();
-    cookieStore.set('miu_admin_access', 'true', {
+    cookieStore.set(ADMIN_SESSION_COOKIE, createAdminSessionValue(correctKey), {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      maxAge: 60 * 60 * 24 * 7, // 1 week
+      sameSite: 'lax',
+      maxAge: getAdminSessionMaxAge(),
       path: '/',
     });
     return { success: true };
@@ -24,5 +46,5 @@ export async function verifyAdminKey(key: string) {
 
 export async function logoutAdmin() {
   const cookieStore = await cookies();
-  cookieStore.delete('miu_admin_access');
+  cookieStore.delete(ADMIN_SESSION_COOKIE);
 }

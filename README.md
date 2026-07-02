@@ -104,5 +104,28 @@ Required environment variables:
 
 - `NEXT_PUBLIC_SUPABASE_URL`
 - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `SUPABASE_SERVICE_ROLE_KEY` (server-only — required for admin course management)
 - `OPENAI_API_KEY` (optional — heuristic fallback runs without it)
 - `MIU_ADMIN_KEY` (admin course management)
+
+Apply database policies from `supabase/migrations/001_rls_policies.sql` in your Supabase SQL editor.
+
+### Seed the course catalog
+
+**Option A — Supabase SQL Editor (no local keys needed):**
+
+1. Open your Supabase project → **SQL Editor**
+2. Run `supabase/migrations/001_rls_policies.sql`
+3. Run `supabase/migrations/002_seed_courses.sql` (adds 9 courses per department/level/semester)
+
+**Option B — Local script (requires `SUPABASE_SERVICE_ROLE_KEY` in `.env.local`):**
+
+```bash
+npm run seed:courses:reset
+```
+
+Regenerate the SQL file after catalog changes:
+
+```bash
+npm run seed:courses:sql
+```

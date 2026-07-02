@@ -3,21 +3,12 @@
 import { generateObject } from 'ai';
 import { openai } from '@ai-sdk/openai';
 import { z } from 'zod';
+import { createClient } from '@/utils/supabase/server';
+import { checkRateLimit } from '@/utils/rate-limit';
+import type { AnalysisSessionInput, ScoredCourse } from '@/types/academic';
+import { validateAnalysisInput } from '@/utils/validation/scores';
 
-type CourseInput = {
-  code: string;
-  title: string;
-  units: number;
-  caScore?: number;
-  examScore?: number;
-  max_ca?: number;
-  max_exam?: number;
-  totalScore?: number;
-  totalMax?: number;
-  caPercentage?: number;
-  examPercentage?: number;
-  totalPercentage?: number;
-};
+type CourseInput = ScoredCourse;
 
 const toNumber = (value: unknown, fallback = 0) => {
   const parsed = Number(value);
@@ -47,22 +38,39 @@ const letterGrade = (percent: number) => {
   return 'F';
 };
 
-const metricFor = (courses: CourseInput[], field: 'caPercentage' | 'examPercentage' | 'totalPercentage'): MetricSet => {
+const metricFor = (
+  courses: CourseInput[],
+  field: 'caPercentage' | 'examPercentage' | 'totalPercentage'
+): MetricSet => {
   if (courses.length === 0) return { average: 0, improvementCourses: [], strengthCourses: [] };
   const average = courses.reduce((sum, c) => sum + toNumber(c[field], 0), 0) / courses.length;
   const sorted = [...courses].sort((a, b) => toNumber(a[field], 0) - toNumber(b[field], 0));
-  // Improvement is required for grades below B (i.e., C, D, E, F).
-  const improvementCourses = sorted.filter((c) => !['A', 'B'].includes(letterGrade(toNumber(c[field], 0)))).map((c) => c.code);
-  const strengthCourses = [...sorted].reverse().slice(0, Math.min(3, sorted.length)).map((c) => c.code);
+  const improvementCourses = sorted
+    .filter((c) => !['A', 'B'].includes(letterGrade(toNumber(c[field], 0))))
+    .map((c) => c.code);
+  const strengthCourses = [...sorted]
+    .reverse()
+    .slice(0, Math.min(3, sorted.length))
+    .map((c) => c.code);
   return { average, improvementCourses, strengthCourses };
 };
 
-function buildHeuristicAnalysis(sessionData: any) {
-  const courses = Array.isArray(sessionData?.courses) ? (sessionData.courses as CourseInput[]) : [];
+function buildHeuristicAnalysis(sessionData: AnalysisSessionInput) {
+  const courses = Array.isArray(sessionData?.courses) ? sessionData.courses : [];
   if (courses.length === 0) {
     return {
-      caAnalysis: { average: '0.0', diagnosticSummary: 'No CA scores available yet.', improvementCourses: [], strengthCourses: [] },
-      examAnalysis: { average: '0.0', diagnosticSummary: 'No exam scores available yet.', improvementCourses: [], strengthCourses: [] },
+      caAnalysis: {
+        average: '0.0',
+        diagnosticSummary: 'No CA scores available yet.',
+        improvementCourses: [],
+        strengthCourses: [],
+      },
+      examAnalysis: {
+        average: '0.0',
+        diagnosticSummary: 'No exam scores available yet.',
+        improvementCourses: [],
+        strengthCourses: [],
+      },
       totalAnalysis: {
         currentGpa: '0.00',
         standing: 'Pass',
@@ -74,7 +82,8 @@ function buildHeuristicAnalysis(sessionData: any) {
           'Practice past questions under time limits for better exam confidence.',
           'Review mistakes after each test and discuss difficult topics early.',
         ],
-        nextSemesterPrediction: 'With consistent study habits and early revision, your next semester performance is likely to improve.',
+        nextSemesterPrediction:
+          'With consistent study habits and early revision, your next semester performance is likely to improve.',
       },
     };
   }
@@ -84,8 +93,10 @@ function buildHeuristicAnalysis(sessionData: any) {
   const total = metricFor(courses, 'totalPercentage');
   const totalUnits = courses.reduce((sum, c) => sum + Math.max(1, toNumber(c.units, 1)), 0);
   const weightedPercent =
-    courses.reduce((sum, c) => sum + toNumber(c.totalPercentage, 0) * Math.max(1, toNumber(c.units, 1)), 0) /
-    Math.max(1, totalUnits);
+    courses.reduce(
+      (sum, c) => sum + toNumber(c.totalPercentage, 0) * Math.max(1, toNumber(c.units, 1)),
+      0
+    ) / Math.max(1, totalUnits);
   const projectedGpa = Math.min(5, Math.max(0, (weightedPercent / 100) * 5));
 
   return {
@@ -112,18 +123,52 @@ function buildHeuristicAnalysis(sessionData: any) {
         'Use active recall and past questions instead of passive reading.',
         'Start revision early and keep a fixed exam-practice routine.',
       ],
-      nextSemesterPrediction: 'If you keep consistent study routines and close current weak areas early, your next semester result should show a measurable upward trend.',
+      nextSemesterPrediction:
+        'If you keep consistent study routines and close current weak areas early, your next semester result should show a measurable upward trend.',
     },
   };
 }
 
-export async function generateAIAnalysis(sessionData: any) {
+export async function generateAIAnalysis(sessionData: AnalysisSessionInput) {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    return { success: false as const, error: 'Authentication required.' };
+  }
+
+  if (!checkRateLimit(`ai-analysis:${user.id}`, 10, 60 * 1000)) {
+    return { success: false as const, error: 'Rate limit exceeded. Please wait a moment and try again.' };
+  }
+
+  const validation = validateAnalysisInput(sessionData);
+  if (!validation.valid) {
+    return { success: false as const, error: validation.error };
+  }
+
   const heuristic = buildHeuristicAnalysis(sessionData);
 
   try {
     if (!process.env.OPENAI_API_KEY) {
-      return { success: true, analysis: heuristic };
+      return { success: true as const, analysis: heuristic };
     }
+
+    const sanitizedPrompt = {
+      faculty: sessionData.faculty,
+      department: sessionData.department,
+      level: sessionData.level,
+      semester: sessionData.semester,
+      courses: sessionData.courses.map((course) => ({
+        code: course.code,
+        title: course.title,
+        units: course.units,
+        caPercentage: course.caPercentage,
+        examPercentage: course.examPercentage,
+        totalPercentage: course.totalPercentage,
+      })),
+    };
 
     const { object } = await generateObject({
       model: openai('gpt-4o-mini'),
@@ -136,7 +181,7 @@ export async function generateAIAnalysis(sessionData: any) {
       Grade interpretation: A>=70, B>=60, C>=50, D>=45, E>=40, F<40.
       Any course below grade B should be in improvementCourses.
       Use only the provided numbers.`,
-      prompt: `Analyze the following student data:\n\n${JSON.stringify(sessionData, null, 2)}`,
+      prompt: `Analyze the following student data:\n\n${JSON.stringify(sanitizedPrompt, null, 2)}`,
       schema: z.object({
         caAnalysis: z.object({
           average: z.string(),
@@ -159,12 +204,12 @@ export async function generateAIAnalysis(sessionData: any) {
           studyTips: z.array(z.string()),
           nextSemesterPrediction: z.string(),
         }),
-      })
+      }),
     });
 
-    return { success: true, analysis: object };
-  } catch (error: any) {
-    console.error("AI Generation Failed:", error);
-    return { success: true, analysis: heuristic };
+    return { success: true as const, analysis: object };
+  } catch (error) {
+    console.error('AI Generation Failed:', error);
+    return { success: true as const, analysis: heuristic };
   }
 }

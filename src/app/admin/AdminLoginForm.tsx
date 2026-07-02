@@ -19,7 +19,8 @@ export default function AdminLoginForm() {
     try {
       const res = await verifyAdminKey(key);
       if (res.success) {
-        router.refresh(); // Refresh to trigger layout cookie check
+        router.push('/admin/courses');
+        router.refresh();
       } else {
         setError(res.error || 'Access denied');
       }

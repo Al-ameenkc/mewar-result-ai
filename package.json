@@ -4,9 +4,13 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:3001": "next dev -p 3001",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "seed:courses": "npx tsx scripts/seed-courses.ts",
+    "seed:courses:reset": "npx tsx scripts/seed-courses.ts --reset",
+    "seed:courses:sql": "npx tsx scripts/generate-courses-sql.ts"
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.52",
@@ -14,13 +18,11 @@
     "@supabase/supabase-js": "^2.102.1",
     "ai": "^6.0.154",
     "framer-motion": "^12.38.0",
-    "html2canvas": "^1.4.1",
-    "jspdf": "^4.2.1",
     "lucide-react": "^1.7.0",
-    "next": "16.2.1",
-    "openai": "^6.34.0",
+    "next": "16.2.10",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
@@ -31,6 +33,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.2.1",
     "tailwindcss": "^4",
+    "tsx": "^4.20.3",
     "typescript": "^5"
   }
 }

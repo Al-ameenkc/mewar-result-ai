@@ -1,12 +1,11 @@
 import React from 'react';
-import { cookies } from 'next/headers';
+import { hasAdminAccess } from '@/utils/auth/admin';
 import AdminLoginForm from './AdminLoginForm';
 
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
-  const cookieStore = await cookies();
-  const hasAccess = cookieStore.get('miu_admin_access')?.value === 'true';
+  const allowed = await hasAdminAccess();
 
-  if (!hasAccess) {
+  if (!allowed) {
     return <AdminLoginForm />;
   }
 

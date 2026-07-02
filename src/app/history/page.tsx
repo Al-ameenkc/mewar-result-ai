@@ -7,6 +7,8 @@ import {
   Trash2, BrainCircuit, Calendar, FileText, Loader2
 } from 'lucide-react';
 import { createClient } from '@/utils/supabase/client';
+import { deleteAnalysisSession } from '@/app/actions/sessions';
+import type { AIAnalysis, ScoreEntry, ScoredCourse } from '@/types/academic';
 
 type HistoryItem = {
   id: string;
@@ -16,8 +18,9 @@ type HistoryItem = {
   level: string;
   semester: string;
   assessmentType: string;
-  scores: Record<string, number>;
-  courses: Array<{ code: string; title: string; units: number }>;
+  scores: Record<string, ScoreEntry>;
+  courses: ScoredCourse[];
+  aiAnalysis?: AIAnalysis | null;
 };
 
 type AnalysisSessionRow = {
@@ -28,8 +31,9 @@ type AnalysisSessionRow = {
   level: string;
   semester: string;
   assessment_type: string;
-  scores: Record<string, number>;
-  courses: Array<{ code: string; title: string; units: number }>;
+  scores: Record<string, ScoreEntry>;
+  courses: ScoredCourse[];
+  ai_analysis?: AIAnalysis | null;
 };
 
 const HISTORY_CACHE_TTL_MS = 1000 * 60 * 2;
@@ -69,7 +73,6 @@ export default function AnalysisHistory() {
           .order('created_at', { ascending: false });
           
         if (!error && data) {
-          // Map DB columns back to frontend shape
           const formatted = (data as AnalysisSessionRow[]).map((dbItem) => ({
             id: dbItem.id,
             date: new Date(dbItem.created_at).toLocaleDateString(),
@@ -79,7 +82,8 @@ export default function AnalysisHistory() {
             semester: dbItem.semester,
             assessmentType: dbItem.assessment_type,
             scores: dbItem.scores,
-            courses: dbItem.courses
+            courses: dbItem.courses,
+            aiAnalysis: dbItem.ai_analysis ?? null,
           }));
           setHistory(formatted);
           localStorage.setItem(userCacheKey, JSON.stringify({ ts: Date.now(), data: formatted }));
@@ -89,12 +93,13 @@ export default function AnalysisHistory() {
       } else {
         setIsLoggedIn(false);
         setHistory([]);
+        router.replace('/?login=required');
       }
       setLoading(false);
     };
     
     fetchHistory();
-  }, []);
+  }, [router, supabase]);
 
   const viewAnalysis = (item: HistoryItem) => {
     localStorage.setItem('miu_current_session', JSON.stringify(item));
@@ -104,12 +109,37 @@ export default function AnalysisHistory() {
   const deleteHistory = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     
-    // Optimistic UI update
     const updated = history.filter(item => item.id !== id);
     setHistory(updated);
 
-    // Delete from Supabase
-    await supabase.from('analysis_sessions').delete().eq('id', id);
+    const result = await deleteAnalysisSession(id);
+    if (!result.success) {
+      alert(result.error);
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session?.user) {
+        const { data } = await supabase
+          .from('analysis_sessions')
+          .select('*')
+          .eq('user_id', session.user.id)
+          .order('created_at', { ascending: false });
+        if (data) {
+          setHistory(
+            (data as AnalysisSessionRow[]).map((dbItem) => ({
+              id: dbItem.id,
+              date: new Date(dbItem.created_at).toLocaleDateString(),
+              faculty: dbItem.faculty,
+              department: dbItem.department,
+              level: dbItem.level,
+              semester: dbItem.semester,
+              assessmentType: dbItem.assessment_type,
+              scores: dbItem.scores,
+              courses: dbItem.courses,
+              aiAnalysis: dbItem.ai_analysis ?? null,
+            }))
+          );
+        }
+      }
+    }
   };
 
   return (
